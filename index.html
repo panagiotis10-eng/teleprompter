@@ -1,0 +1,288 @@
+<!DOCTYPE html>
+<html lang="el">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Teleprompter V2</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { background: #111; color: #fff; font-family: Georgia, serif; height: 100vh; display: flex; flex-direction: column; }
+
+  #toolbar {
+    background: #1a1a1a; border-bottom: 1px solid #333;
+    padding: 10px 16px; display: flex; align-items: center; gap: 12px; flex-wrap: wrap; flex-shrink: 0;
+  }
+  #toolbar label { font-size: 13px; color: #aaa; }
+  #toolbar input[type=range] { width: 90px; accent-color: #f90; }
+
+  button { padding: 8px 18px; border: none; border-radius: 6px; font-size: 14px; cursor: pointer; font-weight: bold; }
+  #btnLoad  { background: #f90; color: #000; }
+  #btnStart { background: #0c0; color: #000; }
+  #btnStop  { background: #c00; color: #fff; display: none; }
+  #btnReset { background: #444; color: #fff; }
+
+  #statusDot { width: 12px; height: 12px; border-radius: 50%; background: #444; flex-shrink: 0; }
+  #statusDot.on  { background: #0f0; box-shadow: 0 0 8px #0f0; animation: pulse 1s infinite; }
+  #statusDot.err { background: #f00; }
+  @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:.4} }
+
+  #statusText { font-size: 12px; color: #aaa; }
+  #heardText  { font-size: 13px; color: #f90; font-style: italic; flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+  #editPane { flex:1; display:flex; flex-direction:column; padding:16px; gap:10px; }
+  #editPane h2 { font-size:15px; color:#aaa; font-weight:normal; }
+  #textInput { flex:1; background:#1e1e1e; border:1px solid #333; border-radius:8px; color:#eee; font-size:18px; line-height:1.7; padding:16px; resize:none; font-family:inherit; }
+
+  #prompterPane { display:none; flex:1; overflow:hidden; position:relative; }
+  #prompterPane::before, #prompterPane::after { content:''; position:absolute; left:0; right:0; height:120px; z-index:2; pointer-events:none; }
+  #prompterPane::before { top:0; background:linear-gradient(#111,transparent); }
+  #prompterPane::after  { bottom:0; background:linear-gradient(transparent,#111); }
+  #centerLine { position:absolute; left:0; right:0; top:50%; transform:translateY(-50%); height:3px; background:rgba(255,153,0,.35); z-index:3; pointer-events:none; }
+  #scrollContainer { height:100%; overflow:hidden; }
+  #textDisplay { padding:30vh 10vw 50vh; font-size:36px; line-height:1.8; }
+  .word { display:inline; border-radius:4px; padding:0 2px; }
+  .word.done    { color:#555; }
+  .word.current { background:#f90; color:#000; padding:0 5px; border-radius:5px; }
+  .word.upcoming{ color:#fff; }
+  #fontSizeVal { min-width:30px; text-align:center; font-size:13px; color:#eee; }
+</style>
+</head>
+<body>
+
+<div id="toolbar">
+  <button id="btnLoad">Φόρτωση →</button>
+  <button id="btnStart">▶ Έναρξη</button>
+  <button id="btnStop">■ Παύση</button>
+  <button id="btnReset">↺ Επαναφορά</button>
+  <div id="statusDot"></div>
+  <span id="statusText">Έτοιμο</span>
+  <span id="heardText"></span>
+  <label>Μέγεθος: <input type="range" id="fontSize" min="20" max="80" value="36"></label>
+  <span id="fontSizeVal">36px</span>
+  <label style="margin-left:auto;display:flex;align-items:center;gap:6px;"><input type="checkbox" id="mirrorMode"> Κατοπτρισμός</label>
+</div>
+
+<div id="editPane">
+  <h2>Επικολλήστε το κείμενό σας:</h2>
+  <textarea id="textInput" placeholder="Γράψτε ή επικολλήστε το κείμενό σας εδώ..."></textarea>
+</div>
+
+<div id="prompterPane">
+  <div id="centerLine"></div>
+  <div id="scrollContainer"><div id="textDisplay"></div></div>
+</div>
+
+<script>
+let words = [];
+let currentIndex = 0;
+let recognition = null;
+let isListening = false;
+let processedCounts = {}; // tracks how many words processed per result slot
+let lastFinalTranscript = ''; // prevents double-processing same final result
+
+const $ = id => document.getElementById(id);
+const btnLoad = $('btnLoad'), btnStart = $('btnStart'), btnStop = $('btnStop'), btnReset = $('btnReset');
+const statusDot = $('statusDot'), statusText = $('statusText'), heardText = $('heardText');
+const textInput = $('textInput'), editPane = $('editPane'), prompterPane = $('prompterPane');
+const textDisplay = $('textDisplay'), scrollContainer = $('scrollContainer');
+const fontSizeSlider = $('fontSize'), fontSizeVal = $('fontSizeVal');
+
+// Remove Greek accents via explicit lookup (avoids regex encoding issues)
+const TONOS = {'ά':'α','έ':'ε','ή':'η','ί':'ι','ό':'ο','ύ':'υ','ώ':'ω',
+               'ϊ':'ι','ϋ':'υ','ΐ':'ι','ΰ':'υ',
+               'Ά':'α','Έ':'ε','Ή':'η','Ί':'ι','Ό':'ο','Ύ':'υ','Ώ':'ω'};
+function normalize(s) {
+  return s.toLowerCase()
+    .split('').map(c => TONOS[c] || c).join('')
+    .replace(/[^α-ωa-z0-9]/g, '');
+}
+
+function tokenize(text) {
+  // Split on whitespace AND hyphens so "Text-to-Speech" → ["Text","to","Speech"]
+  return text.trim().split(/[\s-–—]+/).filter(Boolean);
+}
+
+function loadText() {
+  const raw = textInput.value.trim();
+  if (!raw) { alert('Παρακαλώ εισάγετε κείμενο.'); return; }
+  const tokens = tokenize(raw);
+  words = tokens.map((text, index) => ({ text, norm: normalize(text), index, el: null }));
+  textDisplay.innerHTML = '';
+  for (const w of words) {
+    const span = document.createElement('span');
+    span.className = 'word upcoming';
+    span.textContent = w.text;
+    textDisplay.appendChild(span);
+    textDisplay.appendChild(document.createTextNode(' '));
+    w.el = span;
+  }
+  currentIndex = 0;
+  editPane.style.display = 'none';
+  prompterPane.style.display = 'block';
+  btnLoad.textContent = '← Επεξεργασία';
+  // Wait for layout before scrolling so getBoundingClientRect is accurate
+  requestAnimationFrame(() => highlightCurrent());
+}
+
+function goEdit() {
+  stopRecognition();
+  editPane.style.display = 'flex';
+  prompterPane.style.display = 'none';
+  btnLoad.textContent = 'Φόρτωση →';
+  btnStop.style.display = 'none';
+  btnStart.style.display = '';
+  setStatus('idle');
+}
+
+btnLoad.addEventListener('click', () => prompterPane.style.display === 'block' ? goEdit() : loadText());
+
+function highlightCurrent() {
+  for (let i = 0; i < words.length; i++) {
+    const el = words[i].el;
+    if (i < currentIndex)       el.className = 'word done';
+    else if (i === currentIndex) el.className = 'word current';
+    else                         el.className = 'word upcoming';
+  }
+  scrollToCurrent();
+}
+
+function scrollToCurrent() {
+  if (currentIndex >= words.length) return;
+  const el = words[currentIndex].el;
+  const cr = scrollContainer.getBoundingClientRect();
+  const er = el.getBoundingClientRect();
+  scrollContainer.scrollBy({ top: (er.top + er.height/2) - (cr.top + cr.height/2), behavior: 'smooth' });
+}
+
+// Advance cursor by matching spoken words sequentially in text
+function processTranscript(transcript) {
+  heardText.textContent = '🎙 ' + transcript;
+  const spoken = tokenize(transcript).map(normalize).filter(Boolean);
+  if (!spoken.length) return;
+
+  const WINDOW = 8; // max words to look ahead for each spoken word
+  for (const word of spoken) {
+    const limit = Math.min(words.length, currentIndex + 1 + WINDOW);
+    for (let i = currentIndex + 1; i < limit; i++) {
+      if (words[i].norm === word) {
+        currentIndex = i;
+        highlightCurrent();
+        break;
+      }
+    }
+  }
+}
+
+function setStatus(state, msg) {
+  statusDot.className = '';
+  if (state === 'listening') { statusDot.classList.add('on');  statusText.textContent = 'Ακούω...'; }
+  else if (state === 'error'){ statusDot.classList.add('err'); statusText.textContent = msg || 'Σφάλμα'; }
+  else { statusText.textContent = msg || 'Έτοιμο'; }
+}
+
+function startRecognition() {
+  if (!('webkitSpeechRecognition' in window) && !('SpeechRecognition' in window)) {
+    alert('Χρησιμοποιήστε Chrome ή Edge.');
+    return;
+  }
+  const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+  recognition = new SR();
+  recognition.lang = 'el-GR';
+  recognition.continuous = true;
+  recognition.interimResults = true;
+  recognition.maxAlternatives = 1;
+
+  recognition.onstart = () => {
+    isListening = true;
+    processedCounts = {}; // reset on every new session (important for Android)
+    setStatus('listening');
+    btnStart.style.display = 'none';
+    btnStop.style.display = '';
+  };
+
+  recognition.onresult = (event) => {
+    for (let i = event.resultIndex; i < event.results.length; i++) {
+      const result = event.results[i];
+      const transcript = result[0].transcript;
+      heardText.textContent = '🎙 ' + transcript;
+
+      const spoken = tokenize(transcript).map(normalize).filter(Boolean);
+      const already = processedCounts[i] || 0;
+      const newWords = spoken.slice(already);
+
+      if (result.isFinal) {
+        delete processedCounts[i];
+      } else {
+        processedCounts[i] = spoken.length;
+      }
+
+      if (!newWords.length) continue;
+
+      // WINDOW=2: very tight — prevents jumps, allows 1 skipped word
+      const WINDOW = 2;
+      for (const word of newWords) {
+        const limit = Math.min(words.length, currentIndex + 1 + WINDOW);
+        for (let j = currentIndex + 1; j < limit; j++) {
+          if (words[j].norm === word) {
+            currentIndex = j;
+            highlightCurrent();
+            break;
+          }
+        }
+      }
+    }
+  };
+
+  recognition.onerror = (e) => {
+    if (e.error === 'no-speech' || e.error === 'aborted') return;
+    setStatus('error', 'Σφάλμα: ' + e.error);
+  };
+
+  recognition.onend = () => {
+    // Restart automatically for next utterance
+    if (isListening) try { recognition.start(); } catch(e) {}
+  };
+
+  recognition.start();
+}
+
+function stopRecognition() {
+  isListening = false;
+  if (recognition) { recognition.abort(); recognition = null; }
+  btnStop.style.display = 'none';
+  btnStart.style.display = '';
+  heardText.textContent = '';
+  setStatus('idle', 'Σταματημένο');
+}
+
+btnStart.addEventListener('click', () => { if (words.length) startRecognition(); });
+btnStop.addEventListener('click', stopRecognition);
+btnReset.addEventListener('click', () => {
+  stopRecognition();
+  currentIndex = 0;
+  highlightCurrent();
+  scrollContainer.scrollTo({ top: 0, behavior: 'smooth' });
+});
+
+fontSizeSlider.addEventListener('input', () => {
+  fontSizeVal.textContent = fontSizeSlider.value + 'px';
+  textDisplay.style.fontSize = fontSizeSlider.value + 'px';
+});
+
+$('mirrorMode').addEventListener('change', e => {
+  textDisplay.style.transform = e.target.checked ? 'scaleX(-1)' : '';
+});
+
+document.addEventListener('keydown', e => {
+  if (e.target === textInput) return;
+  if (e.key === ' ' || e.key === 'Enter') {
+    e.preventDefault();
+    isListening ? stopRecognition() : (words.length && startRecognition());
+  }
+  if (e.key === 'ArrowRight' || e.key === 'ArrowDown') { currentIndex = Math.min(currentIndex+1, words.length-1); highlightCurrent(); }
+  if (e.key === 'ArrowLeft'  || e.key === 'ArrowUp')   { currentIndex = Math.max(currentIndex-1, 0); highlightCurrent(); }
+  if (e.key === 'Escape') goEdit();
+});
+</script>
+</body>
+</html>
