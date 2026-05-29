@@ -6,7 +6,7 @@
 <title>Teleprompter V2</title>
 <style>
   * { box-sizing: border-box; margin: 0; padding: 0; }
-  body { background: #111; color: #fff; font-family: Georgia, serif; height: 100vh; display: flex; flex-direction: column; }
+  body { background: #111; color: #fff; font-family: Arial, sans-serif; height: 100vh; display: flex; flex-direction: column; }
 
   #toolbar {
     background: #1a1a1a; border-bottom: 1px solid #333;
@@ -39,7 +39,7 @@
   #prompterPane::after  { bottom:0; background:linear-gradient(transparent,#111); }
   #centerLine { position:absolute; left:0; right:0; top:50%; transform:translateY(-50%); height:3px; background:rgba(255,153,0,.35); z-index:3; pointer-events:none; }
   #scrollContainer { height:100%; overflow:hidden; }
-  #textDisplay { padding:30vh 10vw 50vh; font-size:36px; line-height:1.8; }
+  #textDisplay { padding:30vh 3vw 50vh; font-size:36px; line-height:1.8; }
   .word { display:inline; border-radius:4px; padding:0 2px; }
   .word.done    { color:#555; }
   .word.current { background:#f90; color:#000; padding:0 5px; border-radius:5px; }
@@ -59,7 +59,8 @@
   <span id="heardText"></span>
   <label>Μέγεθος: <input type="range" id="fontSize" min="20" max="80" value="36"></label>
   <span id="fontSizeVal">36px</span>
-  <label style="margin-left:auto;display:flex;align-items:center;gap:6px;"><input type="checkbox" id="mirrorMode"> Κατοπτρισμός</label>
+  <button id="btnFS" style="margin-left:auto;background:#333;color:#fff;">⛶ Fullscreen</button>
+  <label style="display:flex;align-items:center;gap:6px;"><input type="checkbox" id="mirrorMode"> Κατοπτρισμός</label>
 </div>
 
 <div id="editPane">
@@ -271,6 +272,20 @@ fontSizeSlider.addEventListener('input', () => {
 
 $('mirrorMode').addEventListener('change', e => {
   textDisplay.style.transform = e.target.checked ? 'scaleX(-1)' : '';
+});
+
+$('btnFS').addEventListener('click', () => {
+  if (!document.fullscreenElement) {
+    document.documentElement.requestFullscreen();
+    $('btnFS').textContent = '✕ Exit';
+  } else {
+    document.exitFullscreen();
+    $('btnFS').textContent = '⛶ Fullscreen';
+  }
+});
+
+document.addEventListener('fullscreenchange', () => {
+  if (!document.fullscreenElement) $('btnFS').textContent = '⛶ Fullscreen';
 });
 
 document.addEventListener('keydown', e => {
